@@ -1,0 +1,2 @@
+ultralytics>=8.3   # YOLO11; pulls in torch, torchvision and opencv-python
+pyserial>=3.5      # talks to the ESP32 over USB
