@@ -41,6 +41,7 @@ BASE, SHOULDER, ELBOW, WRIST, GRIPPER = range(5)
 LIMITS = [(45, 135), (45, 135), (45, 130), (45, 170), (60, 120)]
 # Netural resting position
 HOME = [90.0, 120.0, 110.0, 150.0, 90.0]
+DETECT = [90.0, 120.0, 110.0, 150.0, 90.0]
 # GraspState = ["APPROACHING", "CLOSING", "VERIFYING", "GRASPED", "FAILED"]
 
 
@@ -192,6 +193,7 @@ def main():
     last_cmd = 0.0
     paused = False
     reached = False
+    mode = "HOME"
     lost_frames = 0
     print("Running. space = pause/resume, h = home, q = quit")
 
@@ -206,105 +208,113 @@ def main():
             print("Camera read failed")
             break
         h, w = frame.shape[:2]
-        result = model.predict(frame, conf=args.conf, device=device, verbose=False)[0]
-        det = pick_target(result, args.target, model.names)
-        status = "searching"
+        # result = model.predict(frame, conf=args.conf, device=device, verbose=False)[0]
+        # det = pick_target(result, args.target, model.names)
+        status = "HOME: Press y for YOLO, m for MediaPipe, q to Quit"
 
-        # Everything YOLO sees, in grey, so you can tell "wrong label" from "nothing seen".
-        for box, cls, conf in zip(result.boxes.xyxy.tolist(), result.boxes.cls.tolist(),
-                                  result.boxes.conf.tolist()):
-            bx1, by1, bx2, by2 = map(int, box)
-            cv2.rectangle(frame, (bx1, by1), (bx2, by2), (160, 160, 160), 1)
-            cv2.putText(frame, f"{model.names[int(cls)]} {conf:.2f}", (bx1, max(by1 - 4, 12)),
-                        # if you found the target in this frame
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.45, (160, 160, 160), 1)
+        if mode == "YOLO":
+            result = model.predict(frame, conf=args.conf, device=device, verbose=False)[0]
+            det = pick_target(result, args.target, model.names)
+            status = "searching"
 
-        if det:
-            # reset the counter 
-            lost_frames = 0 
-            (x1, y1, x2, y2), label, conf = det
-            # how far the box's center is from the frame's horizontal center
-            # normalized to [-1, 1]: + means the object is right of / below the center.
-            ex = ((x1 + x2) / 2 - w / 2) / (w / 2)
-            # how far the box's center is from the frame's vertical center
-            ey = ((y1 + y2) / 2 - h / 2) / (h / 2)
-            # calculates how close it is (bigger box means it's closer to the camera)
-            area = (x2 - x1) * (y2 - y1) / (w * h)
-            centered = abs(ex) < args.deadband and abs(ey) < args.deadband
-            # when an item is reached
-            reached = reached or (centered and area >= args.stop_area)
-            status = f"{label} {conf:.2f}  ex={ex:+.2f} ey={ey:+.2f} area={area:.2f}"
+            # Everything YOLO sees, in grey, so you can tell "wrong label" from "nothing seen".
+            for box, cls, conf in zip(result.boxes.xyxy.tolist(), result.boxes.cls.tolist(),
+                                    result.boxes.conf.tolist()):
+                bx1, by1, bx2, by2 = map(int, box)
+                cv2.rectangle(frame, (bx1, by1), (bx2, by2), (160, 160, 160), 1)
+                cv2.putText(frame, f"{model.names[int(cls)]} {conf:.2f}", (bx1, max(by1 - 4, 12)),
+                            # if you found the target in this frame
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.45, (160, 160, 160), 1)
 
-            now = time.time()
-            if not paused and not reached and now - last_cmd >= period:
-                new = list(pose)
-                if abs(ex) > args.deadband:
-                    new[BASE] -= args.base_gain * ex
-                if abs(ey) > args.deadband:
-                    new[WRIST] += args.tilt_gain * ey
-                # Only reach once roughly centered, so it doesn't lunge off to the side.
-                if abs(ex) < 2 * args.deadband and area < args.stop_area:
-                    step = args.reach_gain * (1 - area / args.stop_area)
-                    new[SHOULDER] += step
-                    new[ELBOW] += step * args.elbow_ratio
-                new = clamp_pose(new)
-                if any(abs(a - b) > 0.05 for a, b in zip(new, pose)):
-                    pose = new
-                    # Duration a bit longer than the send period so motion blends smoothly.
-                    arm.pose(pose, period * 1000 * 1.5)
-                last_cmd = now
+            if det:
+                # reset the counter 
+                lost_frames = 0 
+                (x1, y1, x2, y2), label, conf = det
+                # how far the box's center is from the frame's horizontal center
+                # normalized to [-1, 1]: + means the object is right of / below the center.
+                ex = ((x1 + x2) / 2 - w / 2) / (w / 2)
+                # how far the box's center is from the frame's vertical center
+                ey = ((y1 + y2) / 2 - h / 2) / (h / 2)
+                # calculates how close it is (bigger box means it's closer to the camera)
+                area = (x2 - x1) * (y2 - y1) / (w * h)
+                centered = abs(ex) < args.deadband and abs(ey) < args.deadband
+                # when an item is reached
+                reached = reached or (centered and area >= args.stop_area)
+                status = f"{label} {conf:.2f}  ex={ex:+.2f} ey={ey:+.2f} area={area:.2f}"
 
-            # if reached and args.grab is not None and pose[GRIPPER] != args.grab:
-            #     pose[GRIPPER] = args.grab
-            #     pose = clamp_pose(pose)
-            #     arm.pose(pose, 800)
+                now = time.time()
+                if not paused and not reached and now - last_cmd >= period:
+                    new = list(pose)
+                    if abs(ex) > args.deadband:
+                        new[BASE] -= args.base_gain * ex
+                    if abs(ey) > args.deadband:
+                        new[WRIST] += args.tilt_gain * ey
+                    # Only reach once roughly centered, so it doesn't lunge off to the side.
+                    if abs(ex) < 2 * args.deadband and area < args.stop_area:
+                        step = args.reach_gain * (1 - area / args.stop_area)
+                        new[SHOULDER] += step
+                        new[ELBOW] += step * args.elbow_ratio
+                    new = clamp_pose(new)
+                    if any(abs(a - b) > 0.05 for a, b in zip(new, pose)):
+                        pose = new
+                        # Duration a bit longer than the send period so motion blends smoothly.
+                        arm.pose(pose, period * 1000 * 1.5)
+                    last_cmd = now
 
-            color = (0, 255, 0) if reached else (0, 200, 255)
-            cv2.rectangle(frame, (int(x1), int(y1)), (int(x2), int(y2)), color, 2)
-        else:
-            lost_frames += 1
-            if lost_frames == 5 and not args.dry_run:
-                arm.send("stop")  # freeze rather than drift on stale commands
+                # if reached and args.grab is not None and pose[GRIPPER] != args.grab:
+                #     pose[GRIPPER] = args.grab
+                #     pose = clamp_pose(pose)
+                #     arm.pose(pose, 800)
 
-        if state == "APPROACHING":
-            # if det and centered and area >= args.stop_area:
-            #     pre_grab_area = area
-            #     pose[GRIPPER] = args.grab
-            #     pose = clamp_pose(pose)
-            #     arm.pose(pose, 800)
-            #     state, state_t0 = "CLOSING", now
-            if det and centered and area >= args.stop_area:
-                if args.grab is None:
-                    reached = True   # nothing to grasp with; just hold here
-                else:
-                    pre_grab_area = area
-                    pose[GRIPPER] = args.grab
-                    pose = clamp_pose(pose)
-                    arm.pose(pose, 800)
-                    state, state_t0 = "CLOSING", now
-        elif state == "CLOSING":
-            if now - state_t0 >= args.grasp_settle_ms / 1000:
-                verify_samples.clear()
-                state, state_t0 = "VERIFYING", now
-        elif state == "VERIFYING":
-            verify_samples.append((det is not None, area if det else 0.0))
-            if len(verify_samples) >= args.verify_frames:
-                result = evaluate_grasp(verify_samples, pre_grab_area)
-                if result == "GRASPED":
-                    state = "GRASPED"
-                else:
-                    pose[GRIPPER] = args.open_angle
-                    pose = clamp_pose(pose)
-                    arm.pose(pose, 500)
-                    state = "APPROACHING"
-                    reached = False
-        elif state == "GRASPED":
-            pass 
+                color = (0, 255, 0) if reached else (0, 200, 255)
+                cv2.rectangle(frame, (int(x1), int(y1)), (int(x2), int(y2)), color, 2)
+            else:
+                lost_frames += 1
+                if lost_frames == 5 and not args.dry_run:
+                    arm.send("stop")  # freeze rather than drift on stale commands
 
-        if reached:
-            status = "REACHED  " + status
-        if paused:
-            status = "PAUSED  " + status
+            if state == "APPROACHING":
+                # if det and centered and area >= args.stop_area:
+                #     pre_grab_area = area
+                #     pose[GRIPPER] = args.grab
+                #     pose = clamp_pose(pose)
+                #     arm.pose(pose, 800)
+                #     state, state_t0 = "CLOSING", now
+                if det and centered and area >= args.stop_area:
+                    if args.grab is None:
+                        reached = True   # nothing to grasp with; just hold here
+                    else:
+                        pre_grab_area = area
+                        pose[GRIPPER] = args.grab
+                        pose = clamp_pose(pose)
+                        arm.pose(pose, 800)
+                        state, state_t0 = "CLOSING", now
+            elif state == "CLOSING":
+                if now - state_t0 >= args.grasp_settle_ms / 1000:
+                    verify_samples.clear()
+                    state, state_t0 = "VERIFYING", now
+            elif state == "VERIFYING":
+                verify_samples.append((det is not None, area if det else 0.0))
+                if len(verify_samples) >= args.verify_frames:
+                    result = evaluate_grasp(verify_samples, pre_grab_area)
+                    if result == "GRASPED":
+                        state = "GRASPED"
+                    else:
+                        pose[GRIPPER] = args.open_angle
+                        pose = clamp_pose(pose)
+                        arm.pose(pose, 500)
+                        state = "APPROACHING"
+                        reached = False
+            elif state == "GRASPED":
+                pass 
+
+            if reached:
+                status = "REACHED  " + status
+            if paused:
+                status = "PAUSED  " + status
+        # elif mode == "MEDIAPIPE":
+
+        # Make camera pop up 
         cv2.drawMarker(frame, (w // 2, h // 2), (255, 255, 255), cv2.MARKER_CROSS, 20, 1)
         cv2.putText(frame, status, (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
         cv2.imshow("arm tracker", frame)
@@ -317,7 +327,18 @@ def main():
             if paused:
                 arm.send("stop")
         if key == ord("h"):
+            # pose, reached = list(HOME), False
+            # arm.pose(pose, 1500)
+            mode = "HOME"
             pose, reached = list(HOME), False
+            arm.pose(pose, 1500)
+        if key == ord("m"):
+            mode = "MEDIAPIPE"
+            pose, reached = list(HOME), False
+            arm.pose(pose, 1500)
+        if key == ord("y"):
+            mode = "YOLO"
+            pose, reached = list(DETECT), False
             arm.pose(pose, 1500)
 
     arm.pose(HOME, 1500)
