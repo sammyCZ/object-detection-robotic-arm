@@ -31,6 +31,10 @@ import time
 import cv2
 import torch
 from ultralytics import YOLO
+from mediapipe.tasks import python as mp_tasks
+from mediapipe.tasks.python import vision
+from concurrent.futures import ThreadPoolExecutor
+from mediapipe_helpers import *
 
 # Pose order is ALWAYS [base, shoulder, elbow, wrist, gripper], same as the firmware.
 BASE, SHOULDER, ELBOW, WRIST, GRIPPER = range(5)
@@ -38,6 +42,20 @@ BASE, SHOULDER, ELBOW, WRIST, GRIPPER = range(5)
 # but clamping here stops the controller from "winding up" past a limit.
 LIMITS = [(45, 135), (45, 135), (45, 135), (45, 135), (60, 120)]
 HOME = [90.0, 90.0, 90.0, 90.0, 90.0]
+
+HAND_MODEL_URL = ("https://storage.googleapis.com/mediapipe-models/hand_landmarker/"
+                  "hand_landmarker/float16/latest/hand_landmarker.task")
+HAND_MODEL_PATH = ("hand_landmarker.tasks")
+HAND_CONNECTIONS = [
+    (0, 1), (1, 2), (2, 3), (3, 4),
+    (0, 5), (5, 6), (6, 7), (7, 8),
+    (5, 9), (9, 10), (10, 11), (11, 12),
+    (9, 13), (13, 14), (14, 15), (15, 16),
+    (13, 17), (17, 18), (18, 19), (19, 20),
+    (0, 17),
+]
+
+INDEX_FINGERTIP = 8
 
 
 class ArmLink:
@@ -124,6 +142,16 @@ def pick_target(result, target, names):
     return best
 
 
+def get_box(result):
+    boxes = []
+    for box in result.boxes:
+        x1, y1, x2, y2 = map(int, box.xyxy[0].tolist())
+        name = result.names[int(box.cls[0])]
+        boxes.append((x1, y1, x2, y2, name, float(box.conf[0])))
+    return boxes
+
+
+
 def main():
     ap = argparse.ArgumentParser(description="Steer the ESP32 arm toward a YOLO detection")
     ap.add_argument("--model", default="yolo11n.pt")
@@ -131,6 +159,7 @@ def main():
     ap.add_argument("--target", default=None,
                     help="class to follow, e.g. bottle, cup, sports ball (default: any)")
     ap.add_argument("--conf", type=float, default=0.4)
+    ap.add_argument("--hands", type=int, default=2, help="max hands to track")
     ap.add_argument("--port", default=None, help="serial port (default: auto-detect)")
     ap.add_argument("--dry-run", action="store_true", help="don't open serial, print commands")
     # Degrees per step at full-frame error. Negative = reverse that axis.
@@ -153,6 +182,9 @@ def main():
         raise SystemExit(f"'{args.target}' is not a class of {args.model}. "
                          f"Options: {', '.join(sorted(model.names.values()))}")
 
+    # load  hand model
+    landmarker = load_hand_model(args.hands, HAND_MODEL_PATH, HAND_MODEL_URL)
+
     # V4L2 is Linux-only; elsewhere let OpenCV pick (AVFoundation on a Mac).
     backend = cv2.CAP_V4L2 if sys.platform.startswith("linux") else cv2.CAP_ANY
     cap = cv2.VideoCapture(args.camera, backend)
@@ -171,29 +203,60 @@ def main():
     arm.pose(pose, 1500)
 
     period = 1.0 / args.rate
+    use_hands = True
     last_cmd = 0.0
     paused = False
     reached = False
     lost_frames = 0
-    print("Running. space = pause/resume, h = home, q = quit")
+    start = prev = time.time()
+    print("Running. space = pause/resume, h = home, m = mediapipe, q = quit")
+    current_mode = "home"
+    wave_step = 'idle'
+
 
     while True:
         ok, frame = cap.read()
         if not ok:
             print("Camera read failed")
             break
+
         h, w = frame.shape[:2]
         result = model.predict(frame, conf=args.conf, device=device, verbose=False)[0]
         det = pick_target(result, args.target, model.names)
+        pointing_at = []
         status = "searching"
 
-        # Everything YOLO sees, in grey, so you can tell "wrong label" from "nothing seen".
-        for box, cls, conf in zip(result.boxes.xyxy.tolist(), result.boxes.cls.tolist(),
-                                  result.boxes.conf.tolist()):
-            bx1, by1, bx2, by2 = map(int, box)
-            cv2.rectangle(frame, (bx1, by1), (bx2, by2), (160, 160, 160), 1)
-            cv2.putText(frame, f"{model.names[int(cls)]} {conf:.2f}", (bx1, max(by1 - 4, 12)),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.45, (160, 160, 160), 1)
+        if current_mode == 'mediapipe':
+            timestamp_ms = int( (time.time() - start) * 1000 )
+            hands = detect_hand_postion(landmarker, frame, timestamp_ms)
+            # get box from yolo model
+            boxes = get_box(result)
+            pointing_at = draw(frame, boxes, hands, HAND_CONNECTIONS, INDEX_FINGERTIP)
+            state = None
+            if time.monotonic() >= home_ready_time and wave_step == 'idle' and detect_waving(hands, state, timestamp_ms):
+                pose[BASE] = 70
+                arm.pose(pose, 1000)
+                wave_step = "moving to 70"
+                next_move_time = time.monotonic() + 1
+            elif wave_step == "moving to 70" and time.monotonic() >= next_move_time:
+                pose[BASE] = 110
+                arm.pose(pose, 1000)
+                wave_step = "moving to 90"
+                next_move_time = time.monotonic() + 1
+            elif wave_step == "moving to 90" and time.monotonic() >= next_move_time:
+                pose[BASE] = 90
+                arm.pose(pose, 1000)
+                wave_step = "return home"
+                next_move_time = time.monotonic() + 1
+            elif wave_step == "return home" and time.monotonic() >= next_move_time:
+                wave_step = "cooldown"
+                next_move_time = time.monotonic() + 2
+            elif wave_step == "cooldown" and time.monotonic() >= next_move_time:
+                state.clear()
+                wave_step = "idle"
+
+
+
 
         if det:
             lost_frames = 0
@@ -241,8 +304,11 @@ def main():
             status = "REACHED  " + status
         if paused:
             status = "PAUSED  " + status
+
         cv2.drawMarker(frame, (w // 2, h // 2), (255, 255, 255), cv2.MARKER_CROSS, 20, 1)
         cv2.putText(frame, status, (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+        for i, text in enumerate(pointing_at):
+            cv2.putText(frame, text, (10, 55 + 25 * i), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
         cv2.imshow("arm tracker", frame)
 
         key = cv2.waitKey(1) & 0xFF
@@ -255,6 +321,13 @@ def main():
         if key == ord("h"):
             pose, reached = list(HOME), False
             arm.pose(pose, 1500)
+        if key == ord("m"):
+            current_mode = "mediapipe"
+            pose = list(HOME)
+            arm.pose(pose, 1500)
+            home_ready_time = time.monotonic() + 1.5
+            wave_step = "idle"
+            state.clear()
 
     arm.pose(HOME, 1500)
     time.sleep(0.2)
