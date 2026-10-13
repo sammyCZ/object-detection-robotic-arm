@@ -22,27 +22,29 @@ If an axis moves the wrong way, flip the sign of its gain (--base-gain, --tilt-g
 Keys:  space = pause/resume motion   h = home   q = quit (returns home)
 """
 
-import argparse
-import glob
-import sys
-import threading
-import time
+import argparse #command-line flags
+import glob #serial pot (/dev/ttyUSB0)
+import sys #mac or linux- check platform for camera
+import threading #run background thread to print what ESP-32 says
+import time #sleep() and timestamps
 
-import cv2
-import torch
-from ultralytics import YOLO
+import cv2 #OpenCV: camera capture, drawing boxes, etc
+import torch #check if GPU is available
+from ultralytics import YOLO #model/object detector
 
-# Pose order is ALWAYS [base, shoulder, elbow, wrist, gripper], same as the firmware.
+# Pose order is: base = 0, shoulder = 1, elbow = 2, wrist = 3, gripper = 4 on hardware
+# so we make five integer constants 
 BASE, SHOULDER, ELBOW, WRIST, GRIPPER = range(5)
-# Mirror of the soft limits and home in include/config.h. The firmware clamps too,
-# but clamping here stops the controller from "winding up" past a limit.
-LIMITS = [(45, 135), (45, 135), (45, 135), (45, 135), (60, 120)]
-HOME = [90.0, 90.0, 90.0, 90.0, 90.0]
+# Mirror the firmware's safety clamps in the include/config.h.
+# The firmware clamps too, but clamping here stops the controller from "winding up" past a limit.
+LIMITS = [(45, 135), (45, 135), (45, 135), (45, 150), (60, 120)]
+# Netural resting position
+HOME = [90.0, 120.0, 110.0, 150.0, 90.0]
 
 
 class ArmLink:
     """Sends pose commands to the ESP32 over USB serial (or just prints them)."""
-
+    # just prints a note, but doesn't open any real connection
     def __init__(self, port, dry_run):
         self.ser = None
         if dry_run:
