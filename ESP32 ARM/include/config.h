@@ -35,8 +35,8 @@ constexpr JointConfig JOINTS[NUM_JOINTS] = {
   // name        ch  min  max  home  us0   us180
   {"base",       0,  45,  135,  90,   500, 2500},
   {"shoulder",   1,  45,  135,  120,  500, 2500},
-  {"elbow",      2,  45,  135,  110,  500, 2500},
-  {"wrist",      3,  45,  150,  150,  500, 2500},
+  {"elbow",      2,  45,  130,  110,  500, 2500},
+  {"wrist",      3,  45,  175,  150,  500, 2500},
   {"gripper",    4,  60,  120,  90,   500, 2500},
 };
 
