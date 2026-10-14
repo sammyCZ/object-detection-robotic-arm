@@ -39,7 +39,7 @@ import collections
 BASE, SHOULDER, ELBOW, WRIST, GRIPPER = range(5)
 # Mirror the firmware's safety clamps in the include/config.h.
 # The firmware clamps too, but clamping here stops the controller from "winding up" past a limit.
-LIMITS = [(45, 135), (45, 135), (45, 130), (45, 170), (60, 120)]
+LIMITS = [(45, 135), (45, 135), (45, 130), (45, 180), (60, 120)]
 # Netural resting position
 HOME = [90.0, 120.0, 110.0, 150.0, 90.0]
 DETECT = [90.0, 120.0, 110.0, 150.0, 90.0]
@@ -178,6 +178,10 @@ def main():
     # Degrees per step at full-frame error. Negative = reverse that axis.
     ap.add_argument("--base-gain", type=float, default=6.0)
     ap.add_argument("--tilt-gain", type=float, default=4.0)
+    ap.add_argument("--shoulder-track-gain", type=float, default=-1.0,
+                    help="shoulder degrees per vertical tracking step; flip sign to reverse, 0 disables")
+    ap.add_argument("--elbow-track-gain", type=float, default=-1.0,
+                    help="elbow degrees per vertical tracking step; flip sign to reverse, 0 disables")
     ap.add_argument("--reach-gain", type=float, default=2.0)
     ap.add_argument("--elbow-ratio", type=float, default=1.0,
                     help="elbow degrees moved per shoulder degree while reaching")
@@ -321,6 +325,8 @@ def main():
                         new[BASE] -= args.base_gain * ex
                     if abs(ey) > args.deadband:
                         new[WRIST] += args.tilt_gain * ey
+                        new[SHOULDER] += args.shoulder_track_gain * ey
+                        new[ELBOW] += args.elbow_track_gain * ey
                     # Only reach once roughly centered, so it doesn't lunge off to the side.
                     if abs(ex) < 2 * args.deadband and area < args.stop_area:
                         step = args.reach_gain * (1 - area / args.stop_area)
