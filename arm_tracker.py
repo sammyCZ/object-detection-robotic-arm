@@ -228,6 +228,7 @@ def main():
     start = prev = time.time()
     print("Running. space = pause/resume, h = home, m = mediapipe, q = quit")
     wave_step = 'idle'
+    wave_state = {}
 
 
     state = "APPROACHING"
@@ -255,8 +256,7 @@ def main():
             # get box from yolo model
             boxes = get_box(result)
             pointing_at = draw(frame, boxes, hands, HAND_CONNECTIONS, INDEX_FINGERTIP)
-            state = None
-            if time.monotonic() >= home_ready_time and wave_step == 'idle' and detect_waving(hands, state, timestamp_ms):
+            if time.monotonic() >= home_ready_time and wave_step == 'idle' and detect_waving(hands, wave_state, timestamp_ms):
                 pose[BASE] = 70
                 arm.pose(pose, 1000)
                 wave_step = "moving to 70"
@@ -275,7 +275,7 @@ def main():
                 wave_step = "cooldown"
                 next_move_time = time.monotonic() + 2
             elif wave_step == "cooldown" and time.monotonic() >= next_move_time:
-                state.clear()
+                wave_state.clear()
                 wave_step = "idle"
 
 
@@ -390,8 +390,8 @@ def main():
         # Make camera pop up 
         cv2.drawMarker(frame, (w // 2, h // 2), (255, 255, 255), cv2.MARKER_CROSS, 20, 1)
         cv2.putText(frame, status, (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
-        for i, text in enumerate(pointing_at):
-            cv2.putText(frame, text, (10, 55 + 25 * i), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
+        #for i, text in enumerate(pointing_at):
+            #cv2.putText(frame, text, (10, 55 + 25 * i), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
         cv2.imshow("arm tracker", frame)
 
         key = cv2.waitKey(1) & 0xFF
@@ -413,7 +413,7 @@ def main():
             arm.pose(pose, 1500)
             home_ready_time = time.monotonic() + 1.5
             wave_step = "idle"
-            state.clear()
+            wave_state.clear()
         if key == ord("y"):
             mode = "YOLO"
             pose, reached = list(DETECT), False
