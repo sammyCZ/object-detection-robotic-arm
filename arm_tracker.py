@@ -43,8 +43,6 @@ BASE, SHOULDER, ELBOW, WRIST, GRIPPER = range(5)
 LIMITS = [(45, 135), (45, 135), (45, 130), (45, 180), (60, 120)]
 # Netural resting position
 HOME = [90.0, 120.0, 110.0, 150.0, 90.0]
-# DETECT = [90.0, 120.0, 110.0, 150.0, 90.0]
-# GraspState = ["APPROACHING", "CLOSING", "VERIFYING", "GRASPED", "FAILED"]
 
 HAND_MODEL_URL = ("https://storage.googleapis.com/mediapipe-models/hand_landmarker/"
                   "hand_landmarker/float16/latest/hand_landmarker.task")
@@ -58,7 +56,7 @@ HAND_CONNECTIONS = [
     (0, 17),
 ]
 
-INDEX_FINGERTIP = 8
+INDEX_FINGERTIP = 8 
 
 
 class ArmLink:
@@ -147,13 +145,13 @@ def pick_target(result, target, names):
 def evaluate_grasp(samples, pre_area):
     seen_count = sum(1 for seen, _ in samples if seen)
     if seen_count == 0:
-            return "GRASPED"
+        return "GRASPED"
 
     areas = [a for seen, a in samples if seen]
     avg_area = sum(areas) / len(areas)
     if pre_area and avg_area < pre_area * 0.5:
         return "FAILED"
-    return "FAILED"
+    return "GRASPED"   
 
 
 def get_box(result):
@@ -232,7 +230,6 @@ def main():
     arm.pose(pose, 1500)
 
     period = 1.0 / args.rate
-    use_hands = True
     last_cmd = 0.0
     paused = False
     reached = False
@@ -266,15 +263,19 @@ def main():
                 current_target = candidate
                 reached = False
                 lost_frames = 0
-                # state = "APPROACHING"
+                state, state_t0 = "APPROACHING", time.time()   # add this
             else:
                 print(f"'{candidate}' is not an object that this model detects")
 
         h, w = frame.shape[:2]
-        result = model.predict(frame, conf=args.conf, device=device, verbose=False)[0]
-        det = pick_target(result, args.target, model.names)
-        #pointing_at = []
-        status = "searching"
+        now = time.time()
+        result = None
+        det = None
+        if mode in ("YOLO", "MEDIAPIPE"):
+            result = model.predict(frame, conf=args.conf, device=device, verbose=False)[0]
+            det = pick_target(result, current_target, model.names)
+
+        status = "HOME: H for Home, Press y for YOLO, m for MediaPipe, q to Quit"
 
         if mode == 'MEDIAPIPE':
             timestamp_ms = int( (time.time() - start) * 1000 )
@@ -304,17 +305,7 @@ def main():
                 wave_state.clear()
                 wave_step = "idle"
 
-
-
-        # result = model.predict(frame, conf=args.conf, device=device, verbose=False)[0]
-        # det = pick_target(result, args.target, model.names)
-        # status = "HOME: Press y for YOLO, m for MediaPipe, q to Quit"
-        status = "HOME: H for Home, Press y for YOLO, m for MediaPipe, q to Quit"
-
-
         if mode == "YOLO":
-            result = model.predict(frame, conf=args.conf, device=device, verbose=False)[0]
-            det = pick_target(result, current_target, model.names)
             status = f"searching for {current_target}"
 
             # Everything YOLO sees, in grey, so you can tell "wrong label" from "nothing seen".
@@ -342,7 +333,6 @@ def main():
                 reached = reached or (centered and area >= args.stop_area)
                 status = f"{label} {conf:.2f}  ex={ex:+.2f} ey={ey:+.2f} area={area:.2f}"
 
-                now = time.time()
                 if not paused and not reached and now - last_cmd >= period:
                     new = list(pose)
                     if abs(ex) > args.deadband:
@@ -363,11 +353,6 @@ def main():
                         arm.pose(pose, period * 1000 * 1.5)
                     last_cmd = now
 
-                # if reached and args.grab is not None and pose[GRIPPER] != args.grab:
-                #     pose[GRIPPER] = args.grab
-                #     pose = clamp_pose(pose)
-                #     arm.pose(pose, 800)
-
 
 
                 color = (0, 255, 0) if reached else (0, 200, 255)
@@ -378,12 +363,6 @@ def main():
                     arm.send("stop")  # freeze rather than drift on stale commands
 
             if state == "APPROACHING":
-                # if det and centered and area >= args.stop_area:
-                #     pre_grab_area = area
-                #     pose[GRIPPER] = args.grab
-                #     pose = clamp_pose(pose)
-                #     arm.pose(pose, 800)
-                #     state, state_t0 = "CLOSING", now
                 if det and centered and area >= args.stop_area:
                     if args.grab is None:
                         reached = True   # nothing to grasp with; just hold here
@@ -432,8 +411,6 @@ def main():
             if paused:
                 arm.send("stop")
         if key == ord("h"):
-            # pose, reached = list(HOME), False
-            # arm.pose(pose, 1500)
             mode = "HOME"
             pose, reached = list(HOME), False
             arm.pose(pose, 1500)
