@@ -19,7 +19,7 @@ Usage (inside yolo-env, from the folder with yolo11n.pt):
 If an axis moves the wrong way, flip the sign of its gain (--base-gain, --tilt-gain,
 --reach-gain). Start with --reach-gain 0 to tune steering before letting it reach.
 
-Keys:  space = pause/resume motion   h = home   q = quit (returns home)
+Keys:  space = pause/resume motion   h = home   q = quit (returns home) 
 """
 
 import argparse #command-line flags
