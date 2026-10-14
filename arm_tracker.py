@@ -2,10 +2,10 @@
 YOLO11 + ESP32 arm: steer a camera-on-the-gripper arm toward a detected object.
 
 The camera rides on the arm (eye-in-hand), so no calibration is needed. Each frame:
-  - object left/right of centre  -> rotate the base
-  - object above/below centre    -> tilt the wrist
+  - object left/right of center  -> rotate the base
+  - object above/below center    -> tilt the wrist
   - object smaller than wanted   -> reach forward (shoulder + elbow)
-until the object is centred and fills --stop-area of the frame.
+until the object is centered and fills --stop-area of the frame.
 
 The ESP32 runs the firmware in "ESP32 ARM/" unchanged; this script just sends it
 serial commands like "pose 90 90 90 90 90 150".
@@ -22,26 +22,30 @@ If an axis moves the wrong way, flip the sign of its gain (--base-gain, --tilt-g
 Keys:  space = pause/resume motion   h = home   q = quit (returns home)
 """
 
-import argparse
-import glob
-import sys
-import threading
-import time
+import argparse #command-line flags
+import glob #serial pot (/dev/ttyUSB0)
+import sys #mac or linux- check platform for camera
+import threading #run background thread to print what ESP-32 says
+import time #sleep() and timestamps
 
 import cv2
 import torch
 from ultralytics import YOLO
-from mediapipe.tasks import python as mp_tasks
-from mediapipe.tasks.python import vision
-from concurrent.futures import ThreadPoolExecutor
 from mediapipe_helpers import *
+import torch #check if GPU is available
+from ultralytics import YOLO #model/object detector
+import collections
 
-# Pose order is ALWAYS [base, shoulder, elbow, wrist, gripper], same as the firmware.
+# Pose order is: base = 0, shoulder = 1, elbow = 2, wrist = 3, gripper = 4 on hardware
+# so we make five integer constants 
 BASE, SHOULDER, ELBOW, WRIST, GRIPPER = range(5)
-# Mirror of the soft limits and home in include/config.h. The firmware clamps too,
-# but clamping here stops the controller from "winding up" past a limit.
-LIMITS = [(45, 135), (45, 135), (45, 135), (45, 135), (60, 120)]
-HOME = [90.0, 90.0, 90.0, 90.0, 90.0]
+# Mirror the firmware's safety clamps in the include/config.h.
+# The firmware clamps too, but clamping here stops the controller from "winding up" past a limit.
+LIMITS = [(45, 135), (45, 135), (45, 130), (45, 170), (60, 120)]
+# Netural resting position
+HOME = [90.0, 120.0, 110.0, 150.0, 90.0]
+DETECT = [90.0, 120.0, 110.0, 150.0, 90.0]
+# GraspState = ["APPROACHING", "CLOSING", "VERIFYING", "GRASPED", "FAILED"]
 
 HAND_MODEL_URL = ("https://storage.googleapis.com/mediapipe-models/hand_landmarker/"
                   "hand_landmarker/float16/latest/hand_landmarker.task")
@@ -60,7 +64,7 @@ INDEX_FINGERTIP = 8
 
 class ArmLink:
     """Sends pose commands to the ESP32 over USB serial (or just prints them)."""
-
+    # just prints a note, but doesn't open any real connection
     def __init__(self, port, dry_run):
         self.ser = None
         if dry_run:
@@ -70,7 +74,7 @@ class ArmLink:
 
         port = port or self._find_port()
         try:
-            # Opening the port resets the ESP32, so give it time to boot.
+            # Opening the port resets the ESP32
             self.ser = serial.Serial(port, 115200, timeout=0.1)
         except serial.SerialException as e:
             raise SystemExit(f"Could not open {port}: {e}\n"
@@ -141,6 +145,17 @@ def pick_target(result, target, names):
             best, best_score = (box, label, conf), score
     return best
 
+def evaluate_grasp(samples, pre_area):
+    seen_count = sum(1 for seen, _ in samples if seen)
+    if seen_count == 0:
+            return "GRASPED"
+
+    areas = [a for seen, a in samples if seen]
+    avg_area = sum(areas) / len(areas)
+    if pre_area and avg_area < pre_area * 0.5:
+        return "FAILED"
+    return "FAILED"
+
 
 def get_box(result):
     boxes = []
@@ -169,12 +184,15 @@ def main():
     ap.add_argument("--elbow-ratio", type=float, default=1.0,
                     help="elbow degrees moved per shoulder degree while reaching")
     ap.add_argument("--deadband", type=float, default=0.08,
-                    help="ignore centring errors smaller than this fraction of the frame")
+                    help="ignore centering errors smaller than this fraction of the frame")
     ap.add_argument("--stop-area", type=float, default=0.25,
                     help="stop reaching when the box covers this fraction of the frame")
     ap.add_argument("--rate", type=float, default=8.0, help="commands per second")
     ap.add_argument("--grab", type=float, default=None,
                     help="gripper angle to close to once the object is reached (default: don't grab)")
+    ap.add_argument("--grasp-settle-ms", type=float, default=800)
+    ap.add_argument("--verify-frames", type=int, default=6)
+    ap.add_argument("--open-angle", type=float, default=90.0)
     args = ap.parse_args()
 
     model = YOLO(args.model)
@@ -207,12 +225,17 @@ def main():
     last_cmd = 0.0
     paused = False
     reached = False
+    mode = "HOME"
     lost_frames = 0
     start = prev = time.time()
     print("Running. space = pause/resume, h = home, m = mediapipe, q = quit")
-    current_mode = "home"
     wave_step = 'idle'
 
+
+    state = "APPROACHING"
+    state_t0 = 0.0
+    pre_grab_area = None
+    verify_samples = collections.deque(maxlen=20)
 
     while True:
         ok, frame = cap.read()
@@ -226,7 +249,7 @@ def main():
         pointing_at = []
         status = "searching"
 
-        if current_mode == 'mediapipe':
+        if mode == 'MEDIAPIPE':
             timestamp_ms = int( (time.time() - start) * 1000 )
             hands = detect_hand_postion(landmarker, frame, timestamp_ms)
             # get box from yolo model
@@ -257,54 +280,114 @@ def main():
 
 
 
+        # result = model.predict(frame, conf=args.conf, device=device, verbose=False)[0]
+        # det = pick_target(result, args.target, model.names)
+        status = "HOME: Press y for YOLO, m for MediaPipe, q to Quit"
 
-        if det:
-            lost_frames = 0
-            (x1, y1, x2, y2), label, conf = det
-            # Errors in [-1, 1]: + means the object is right of / below the centre.
-            ex = ((x1 + x2) / 2 - w / 2) / (w / 2)
-            ey = ((y1 + y2) / 2 - h / 2) / (h / 2)
-            area = (x2 - x1) * (y2 - y1) / (w * h)
-            centred = abs(ex) < args.deadband and abs(ey) < args.deadband
-            reached = reached or (centred and area >= args.stop_area)
-            status = f"{label} {conf:.2f}  ex={ex:+.2f} ey={ey:+.2f} area={area:.2f}"
+        if mode == "YOLO":
+            result = model.predict(frame, conf=args.conf, device=device, verbose=False)[0]
+            det = pick_target(result, args.target, model.names)
+            status = "searching"
 
-            now = time.time()
-            if not paused and not reached and now - last_cmd >= period:
-                new = list(pose)
-                if abs(ex) > args.deadband:
-                    new[BASE] -= args.base_gain * ex
-                if abs(ey) > args.deadband:
-                    new[WRIST] += args.tilt_gain * ey
-                # Only reach once roughly centred, so it doesn't lunge off to the side.
-                if abs(ex) < 2 * args.deadband and area < args.stop_area:
-                    step = args.reach_gain * (1 - area / args.stop_area)
-                    new[SHOULDER] += step
-                    new[ELBOW] += step * args.elbow_ratio
-                new = clamp_pose(new)
-                if any(abs(a - b) > 0.05 for a, b in zip(new, pose)):
-                    pose = new
-                    # Duration a bit longer than the send period so motion blends smoothly.
-                    arm.pose(pose, period * 1000 * 1.5)
-                last_cmd = now
+            # Everything YOLO sees, in grey, so you can tell "wrong label" from "nothing seen".
+            for box, cls, conf in zip(result.boxes.xyxy.tolist(), result.boxes.cls.tolist(),
+                                    result.boxes.conf.tolist()):
+                bx1, by1, bx2, by2 = map(int, box)
+                cv2.rectangle(frame, (bx1, by1), (bx2, by2), (160, 160, 160), 1)
+                cv2.putText(frame, f"{model.names[int(cls)]} {conf:.2f}", (bx1, max(by1 - 4, 12)),
+                            # if you found the target in this frame
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.45, (160, 160, 160), 1)
 
-            if reached and args.grab is not None and pose[GRIPPER] != args.grab:
-                pose[GRIPPER] = args.grab
-                pose = clamp_pose(pose)
-                arm.pose(pose, 800)
+            if det:
+                # reset the counter 
+                lost_frames = 0 
+                (x1, y1, x2, y2), label, conf = det
+                # how far the box's center is from the frame's horizontal center
+                # normalized to [-1, 1]: + means the object is right of / below the center.
+                ex = ((x1 + x2) / 2 - w / 2) / (w / 2)
+                # how far the box's center is from the frame's vertical center
+                ey = ((y1 + y2) / 2 - h / 2) / (h / 2)
+                # calculates how close it is (bigger box means it's closer to the camera)
+                area = (x2 - x1) * (y2 - y1) / (w * h)
+                centered = abs(ex) < args.deadband and abs(ey) < args.deadband
+                # when an item is reached
+                reached = reached or (centered and area >= args.stop_area)
+                status = f"{label} {conf:.2f}  ex={ex:+.2f} ey={ey:+.2f} area={area:.2f}"
 
-            color = (0, 255, 0) if reached else (0, 200, 255)
-            cv2.rectangle(frame, (int(x1), int(y1)), (int(x2), int(y2)), color, 2)
-        else:
-            lost_frames += 1
-            if lost_frames == 5 and not args.dry_run:
-                arm.send("stop")  # freeze rather than drift on stale commands
+                now = time.time()
+                if not paused and not reached and now - last_cmd >= period:
+                    new = list(pose)
+                    if abs(ex) > args.deadband:
+                        new[BASE] -= args.base_gain * ex
+                    if abs(ey) > args.deadband:
+                        new[WRIST] += args.tilt_gain * ey
+                    # Only reach once roughly centered, so it doesn't lunge off to the side.
+                    if abs(ex) < 2 * args.deadband and area < args.stop_area:
+                        step = args.reach_gain * (1 - area / args.stop_area)
+                        new[SHOULDER] += step
+                        new[ELBOW] += step * args.elbow_ratio
+                    new = clamp_pose(new)
+                    if any(abs(a - b) > 0.05 for a, b in zip(new, pose)):
+                        pose = new
+                        # Duration a bit longer than the send period so motion blends smoothly.
+                        arm.pose(pose, period * 1000 * 1.5)
+                    last_cmd = now
 
-        if reached:
-            status = "REACHED  " + status
-        if paused:
-            status = "PAUSED  " + status
+                # if reached and args.grab is not None and pose[GRIPPER] != args.grab:
+                #     pose[GRIPPER] = args.grab
+                #     pose = clamp_pose(pose)
+                #     arm.pose(pose, 800)
 
+
+
+                color = (0, 255, 0) if reached else (0, 200, 255)
+                cv2.rectangle(frame, (int(x1), int(y1)), (int(x2), int(y2)), color, 2)
+            else:
+                lost_frames += 1
+                if lost_frames == 5 and not args.dry_run:
+                    arm.send("stop")  # freeze rather than drift on stale commands
+
+            if state == "APPROACHING":
+                # if det and centered and area >= args.stop_area:
+                #     pre_grab_area = area
+                #     pose[GRIPPER] = args.grab
+                #     pose = clamp_pose(pose)
+                #     arm.pose(pose, 800)
+                #     state, state_t0 = "CLOSING", now
+                if det and centered and area >= args.stop_area:
+                    if args.grab is None:
+                        reached = True   # nothing to grasp with; just hold here
+                    else:
+                        pre_grab_area = area
+                        pose[GRIPPER] = args.grab
+                        pose = clamp_pose(pose)
+                        arm.pose(pose, 800)
+                        state, state_t0 = "CLOSING", now
+            elif state == "CLOSING":
+                if now - state_t0 >= args.grasp_settle_ms / 1000:
+                    verify_samples.clear()
+                    state, state_t0 = "VERIFYING", now
+            elif state == "VERIFYING":
+                verify_samples.append((det is not None, area if det else 0.0))
+                if len(verify_samples) >= args.verify_frames:
+                    result = evaluate_grasp(verify_samples, pre_grab_area)
+                    if result == "GRASPED":
+                        state = "GRASPED"
+                    else:
+                        pose[GRIPPER] = args.open_angle
+                        pose = clamp_pose(pose)
+                        arm.pose(pose, 500)
+                        state = "APPROACHING"
+                        reached = False
+            elif state == "GRASPED":
+                pass 
+
+            if reached:
+                status = "REACHED  " + status
+            if paused:
+                status = "PAUSED  " + status
+
+        # Make camera pop up 
         cv2.drawMarker(frame, (w // 2, h // 2), (255, 255, 255), cv2.MARKER_CROSS, 20, 1)
         cv2.putText(frame, status, (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
         for i, text in enumerate(pointing_at):
@@ -319,15 +402,22 @@ def main():
             if paused:
                 arm.send("stop")
         if key == ord("h"):
+            # pose, reached = list(HOME), False
+            # arm.pose(pose, 1500)
+            mode = "HOME"
             pose, reached = list(HOME), False
             arm.pose(pose, 1500)
         if key == ord("m"):
-            current_mode = "mediapipe"
+            mode = "MEDIAPIPE"
             pose = list(HOME)
             arm.pose(pose, 1500)
             home_ready_time = time.monotonic() + 1.5
             wave_step = "idle"
             state.clear()
+        if key == ord("y"):
+            mode = "YOLO"
+            pose, reached = list(DETECT), False
+            arm.pose(pose, 1500)
 
     arm.pose(HOME, 1500)
     time.sleep(0.2)
