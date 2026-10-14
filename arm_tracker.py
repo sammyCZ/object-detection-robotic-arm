@@ -250,7 +250,7 @@ def main():
         det = pick_target(result, args.target, model.names)
 
         status = "HOME: Press y for YOLO, m for MediaPipe, q to Quit"
-        # pointing_at = []
+        pointing_at = []
         # status = "searching"
 
         if mode == 'MEDIAPIPE':
