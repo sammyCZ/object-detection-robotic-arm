@@ -29,11 +29,9 @@ import threading #run background thread to print what ESP-32 says
 import time #sleep() and timestamps
 
 import cv2
-import torch
-from ultralytics import YOLO
-from mediapipe_helpers import *
 import torch #check if GPU is available
 from ultralytics import YOLO #model/object detector
+from mediapipe_helpers import *
 import collections
 
 # Pose order is: base = 0, shoulder = 1, elbow = 2, wrist = 3, gripper = 4 on hardware
@@ -246,8 +244,10 @@ def main():
         h, w = frame.shape[:2]
         result = model.predict(frame, conf=args.conf, device=device, verbose=False)[0]
         det = pick_target(result, args.target, model.names)
-        pointing_at = []
-        status = "searching"
+
+        status = "HOME: Press y for YOLO, m for MediaPipe, q to Quit"
+        # pointing_at = []
+        # status = "searching"
 
         if mode == 'MEDIAPIPE':
             timestamp_ms = int( (time.time() - start) * 1000 )
@@ -282,7 +282,7 @@ def main():
 
         # result = model.predict(frame, conf=args.conf, device=device, verbose=False)[0]
         # det = pick_target(result, args.target, model.names)
-        status = "HOME: Press y for YOLO, m for MediaPipe, q to Quit"
+        # status = "HOME: Press y for YOLO, m for MediaPipe, q to Quit"
 
         if mode == "YOLO":
             result = model.predict(frame, conf=args.conf, device=device, verbose=False)[0]
