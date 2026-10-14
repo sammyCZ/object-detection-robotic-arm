@@ -230,7 +230,6 @@ def main():
     arm.pose(pose, 1500)
 
     period = 1.0 / args.rate
-    use_hands = True
     last_cmd = 0.0
     paused = False
     reached = False
@@ -269,12 +268,12 @@ def main():
                 print(f"'{candidate}' is not an object that this model detects")
 
         h, w = frame.shape[:2]
-        result = None
         now = time.time()
-        result = model.predict(frame, conf=args.conf, device=device, verbose=False)[0]
-        det = pick_target(result, args.target, model.names)
-        #pointing_at = []
-        status = "searching"
+        result = None
+        det = None
+        if mode in ("YOLO", "MEDIAPIPE"):
+            result = model.predict(frame, conf=args.conf, device=device, verbose=False)[0]
+            det = pick_target(result, current_target, model.names)
 
         status = "HOME: H for Home, Press y for YOLO, m for MediaPipe, q to Quit"
 
@@ -354,11 +353,6 @@ def main():
                         arm.pose(pose, period * 1000 * 1.5)
                     last_cmd = now
 
-                # if reached and args.grab is not None and pose[GRIPPER] != args.grab:
-                #     pose[GRIPPER] = args.grab
-                #     pose = clamp_pose(pose)
-                #     arm.pose(pose, 800)
-
 
 
                 color = (0, 255, 0) if reached else (0, 200, 255)
@@ -369,12 +363,6 @@ def main():
                     arm.send("stop")  # freeze rather than drift on stale commands
 
             if state == "APPROACHING":
-                # if det and centered and area >= args.stop_area:
-                #     pre_grab_area = area
-                #     pose[GRIPPER] = args.grab
-                #     pose = clamp_pose(pose)
-                #     arm.pose(pose, 800)
-                #     state, state_t0 = "CLOSING", now
                 if det and centered and area >= args.stop_area:
                     if args.grab is None:
                         reached = True   # nothing to grasp with; just hold here
@@ -423,8 +411,6 @@ def main():
             if paused:
                 arm.send("stop")
         if key == ord("h"):
-            # pose, reached = list(HOME), False
-            # arm.pose(pose, 1500)
             mode = "HOME"
             pose, reached = list(HOME), False
             arm.pose(pose, 1500)
