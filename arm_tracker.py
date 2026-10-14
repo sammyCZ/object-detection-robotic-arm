@@ -56,7 +56,7 @@ HAND_CONNECTIONS = [
     (0, 17),
 ]
 
-INDEX_FINGERTIP = 8
+INDEX_FINGERTIP = 8 
 
 
 class ArmLink:
