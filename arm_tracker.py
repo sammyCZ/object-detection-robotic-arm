@@ -27,6 +27,7 @@ import glob #serial pot (/dev/ttyUSB0)
 import sys #mac or linux- check platform for camera
 import threading #run background thread to print what ESP-32 says
 import time #sleep() and timestamps
+import queue
 
 import cv2
 import torch #check if GPU is available
@@ -42,7 +43,7 @@ BASE, SHOULDER, ELBOW, WRIST, GRIPPER = range(5)
 LIMITS = [(45, 135), (45, 135), (45, 130), (45, 170), (60, 120)]
 # Netural resting position
 HOME = [90.0, 120.0, 110.0, 150.0, 90.0]
-DETECT = [90.0, 120.0, 110.0, 150.0, 90.0]
+# DETECT = [90.0, 120.0, 110.0, 150.0, 90.0]
 # GraspState = ["APPROACHING", "CLOSING", "VERIFYING", "GRASPED", "FAILED"]
 
 HAND_MODEL_URL = ("https://storage.googleapis.com/mediapipe-models/hand_landmarker/"
@@ -163,7 +164,15 @@ def get_box(result):
         boxes.append((x1, y1, x2, y2, name, float(box.conf[0])))
     return boxes
 
-
+# Loops to get user input 
+def stdin_target_listener(q: queue.Queue):
+    while True: 
+        try: 
+            text = input("target> ").strip()
+            if text:
+                q.put(text)
+        except(KeyboardInterrupt, EOFError):
+            break
 
 def main():
     ap = argparse.ArgumentParser(description="Steer the ESP32 arm toward a YOLO detection")
@@ -235,18 +244,33 @@ def main():
     pre_grab_area = None
     verify_samples = collections.deque(maxlen=20)
 
+    # Threads yayyy
+    target_queue = queue.Queue()
+    current_target = args.target
+    threading.Thread(target=stdin_target_listener, args=(target_queue,), daemon=True).start()
+
     while True:
         ok, frame = cap.read()
         if not ok:
             print("Camera read failed")
             break
 
+        while not target_queue.empty():
+            candidate = target_queue.get_nowait()
+            if candidate in model.names.values():
+                current_target = candidate
+                reached = False
+                lost_frames = 0
+                # state = "APPROACHING"
+            else:
+                print(f"'{candidate}' is not an object that this model detects")
+
         h, w = frame.shape[:2]
         result = model.predict(frame, conf=args.conf, device=device, verbose=False)[0]
-        det = pick_target(result, args.target, model.names)
+        det = pick_target(result, current_target, model.names)
 
-        status = "HOME: Press y for YOLO, m for MediaPipe, q to Quit"
-        # pointing_at = []
+        status = "HOME: H for Home, Press y for YOLO, m for MediaPipe, q to Quit"
+        pointing_at = []
         # status = "searching"
 
         if mode == 'MEDIAPIPE':
@@ -286,8 +310,8 @@ def main():
 
         if mode == "YOLO":
             result = model.predict(frame, conf=args.conf, device=device, verbose=False)[0]
-            det = pick_target(result, args.target, model.names)
-            status = "searching"
+            det = pick_target(result, current_target, model.names)
+            status = f"searching for {current_target}"
 
             # Everything YOLO sees, in grey, so you can tell "wrong label" from "nothing seen".
             for box, cls, conf in zip(result.boxes.xyxy.tolist(), result.boxes.cls.tolist(),
@@ -416,7 +440,7 @@ def main():
             state.clear()
         if key == ord("y"):
             mode = "YOLO"
-            pose, reached = list(DETECT), False
+            # pose, reached = list(DETECT), False
             arm.pose(pose, 1500)
 
     arm.pose(HOME, 1500)
