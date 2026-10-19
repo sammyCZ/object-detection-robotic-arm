@@ -24,6 +24,7 @@ Keys:  space = pause/resume motion   h = home   q = quit (returns home)
 
 import argparse #command-line flags
 import glob #serial pot (/dev/ttyUSB0)
+import re
 import sys #mac or linux- check platform for camera
 import threading #run background thread to print what ESP-32 says
 import time #sleep() and timestamps
@@ -257,6 +258,8 @@ def main():
             print("Camera read failed")
             break
 
+
+    
         while not target_queue.empty():
             candidate = target_queue.get_nowait()
             if candidate in model.names.values():
@@ -272,10 +275,13 @@ def main():
         result = None
         det = None
         if mode in ("YOLO", "MEDIAPIPE"):
-            result = model.predict(frame, conf=args.conf, device=device, verbose=False)[0]
+            result = model.predict(frame, device=device, conf=args.conf, verbose=False)[0]
             det = pick_target(result, current_target, model.names)
 
-        status = "HOME: H for Home, Press y for YOLO, m for MediaPipe, q to Quit"
+
+        status = "HOME: Press y for YOLO, m for MediaPipe, q to Quit"
+        pointing_at = []
+        # status = "searching"
 
         if mode == 'MEDIAPIPE':
             timestamp_ms = int( (time.time() - start) * 1000 )
