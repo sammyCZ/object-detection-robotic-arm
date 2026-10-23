@@ -57,8 +57,6 @@ HAND_CONNECTIONS = [
     (0, 17),
 ]
 
-INDEX_FINGERTIP = 8 
-
 
 class ArmLink:
     """Sends pose commands to the ESP32 over USB serial (or just prints them)."""
@@ -143,6 +141,7 @@ def pick_target(result, target, names):
             best, best_score = (box, label, conf), score
     return best
 
+
 def evaluate_grasp(samples, pre_area):
     seen_count = sum(1 for seen, _ in samples if seen)
     if seen_count == 0:
@@ -173,6 +172,7 @@ def stdin_target_listener(q: queue.Queue):
         except(KeyboardInterrupt, EOFError):
             break
 
+
 def main():
 # ---------------------------------------------------------------------------------------------------Neto Check Start -----------------------------
     ap = argparse.ArgumentParser(description="Steer the ESP32 arm toward a YOLO detection")
@@ -180,7 +180,7 @@ def main():
     ap.add_argument("--camera", type=int, default=0, help="camera index (/dev/videoN)")
     ap.add_argument("--target", default=None,
                     help="class to follow, e.g. bottle, cup, sports ball (default: any)")
-    ap.add_argument("--conf", type=float, default=0.1)
+    ap.add_argument("--conf", type=float, default=0.60)
     ap.add_argument("--hands", type=int, default=2, help="max hands to track")
     ap.add_argument("--port", default=None, help="serial port (default: auto-detect)")
     ap.add_argument("--dry-run", action="store_true", help="don't open serial, print commands")
@@ -298,141 +298,147 @@ def main():
         now = time.time()
         result = None
         det = None
-# ----------------------------------------------------------------------------------------------------------Neto Check End--------------------------
+        status = "HOME: Press y for YOLO, m for MediaPipe, q to Quit"
+
         if mode in ("YOLO", "MEDIAPIPE"):
-            result = model.predict(frame, device=device, classes = [39], conf=args.conf, verbose=False)[0]
+            # classes.txt has list of classes
+            # only detects teddy bear, banana, apple, bottle
+            result = model.predict(frame, device=device, classes=[77, 46, 47, 39], conf=args.conf, verbose=False)[0]
             det = pick_target(result, current_target, model.names)
 
+            
+            if mode == 'MEDIAPIPE':
+                timestamp_ms = int( (time.time() - start) * 1000 )
+                hands = detect_hand_postion(landmarker, frame, timestamp_ms)
+                # get box from yolo model
+                boxes = get_box(result)
+                draw_hand_lines(frame, boxes, hands, HAND_CONNECTIONS)
+                # robot wave logic
+                if time.monotonic() >= home_ready_time and wave_step == 'idle' and detect_waving(hands, wave_state, timestamp_ms):
+                    wave_step, next_move_time = update_wave_motion(
+                        arm, 
+                        pose, 
+                        70, 
+                        70,
+                        0
+                    )
+                elif wave_step == "moving to 70" and time.monotonic() >= next_move_time:
+                    wave_step, next_move_time = update_wave_motion(
+                        arm, 
+                        pose, 
+                        110, 
+                        90, 
+                        0,
+                    )
+                elif wave_step == "moving to 90" and time.monotonic() >= next_move_time:
+                    wave_step, next_move_time = update_wave_motion(
+                        arm, 
+                        pose, 
+                        90, 
+                        "home",
+                        0,
+                    )
+                elif wave_step == "moving to home" and time.monotonic() >= next_move_time:
+                    wave_step = "cooldown"
+                    next_move_time = time.monotonic() + 2
+                elif wave_step == "cooldown" and time.monotonic() >= next_move_time:
+                    wave_state.clear()
+                    wave_step = "idle"
 
-        status = "HOME: Press y for YOLO, m for MediaPipe, q to Quit"
-        pointing_at = []
-        # status = "searching"
+            if mode == "YOLO":
+                status = f"searching for {current_target}"
+                
+                # Everything YOLO sees, in grey, so you can tell "wrong label" from "nothing seen".
+                for box, cls, conf in zip(result.boxes.xyxy.tolist(), result.boxes.cls.tolist(),
+                                        result.boxes.conf.tolist()):
+                    bx1, by1, bx2, by2 = map(int, box)
+                    cv2.rectangle(frame, (bx1, by1), (bx2, by2), (160, 160, 160), 1)
+                    cv2.putText(frame, f"{model.names[int(cls)]} {conf:.2f}", (bx1, max(by1 - 4, 12)),
+                                # if you found the target in this frame
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.45, (160, 160, 160), 1)
 
-        if mode == 'MEDIAPIPE':
-            timestamp_ms = int( (time.time() - start) * 1000 )
-            hands = detect_hand_postion(landmarker, frame, timestamp_ms)
-            # get box from yolo model
-            boxes = get_box(result)
-            pointing_at = draw(frame, boxes, hands, HAND_CONNECTIONS, INDEX_FINGERTIP)
-            if time.monotonic() >= home_ready_time and wave_step == 'idle' and detect_waving(hands, wave_state, timestamp_ms):
-                pose[BASE] = 70
-                arm.pose(pose, 1000)
-                wave_step = "moving to 70"
-                next_move_time = time.monotonic() + 1
-            elif wave_step == "moving to 70" and time.monotonic() >= next_move_time:
-                pose[BASE] = 110
-                arm.pose(pose, 1000)
-                wave_step = "moving to 90"
-                next_move_time = time.monotonic() + 1
-            elif wave_step == "moving to 90" and time.monotonic() >= next_move_time:
-                pose[BASE] = 90
-                arm.pose(pose, 1000)
-                wave_step = "return home"
-                next_move_time = time.monotonic() + 1
-            elif wave_step == "return home" and time.monotonic() >= next_move_time:
-                wave_step = "cooldown"
-                next_move_time = time.monotonic() + 2
-            elif wave_step == "cooldown" and time.monotonic() >= next_move_time:
-                wave_state.clear()
-                wave_step = "idle"
+                if det:
+                    # reset the counter 
+                    lost_frames = 0 
+                    (x1, y1, x2, y2), label, conf = det
+                    # how far the box's center is from the frame's horizontal center
+                    # normalized to [-1, 1]: + means the object is right of / below the center.
+                    ex = ((x1 + x2) / 2 - w / 2) / (w / 2)
+                    # how far the box's center is from the frame's vertical center
+                    ey = ((y1 + y2) / 2 - h / 2) / (h / 2)
+                    # calculates how close it is (bigger box means it's closer to the camera)
+                    area = (x2 - x1) * (y2 - y1) / (w * h)
+                    centered = abs(ex) < args.deadband and abs(ey) < args.deadband
+                    # when an item is reached
+                    reached = reached or (centered and area >= args.stop_area)
+                    status = f"{label} {conf:.2f}  ex={ex:+.2f} ey={ey:+.2f} area={area:.2f}"
 
-        if mode == "YOLO":
-            status = f"searching for {current_target}"
-
-            # Everything YOLO sees, in grey, so you can tell "wrong label" from "nothing seen".
-            for box, cls, conf in zip(result.boxes.xyxy.tolist(), result.boxes.cls.tolist(),
-                                    result.boxes.conf.tolist()):
-                bx1, by1, bx2, by2 = map(int, box)
-                cv2.rectangle(frame, (bx1, by1), (bx2, by2), (160, 160, 160), 1)
-                cv2.putText(frame, f"{model.names[int(cls)]} {conf:.2f}", (bx1, max(by1 - 4, 12)),
-                            # if you found the target in this frame
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.45, (160, 160, 160), 1)
-
-            if det:
-                # reset the counter 
-                lost_frames = 0 
-                (x1, y1, x2, y2), label, conf = det
-                # how far the box's center is from the frame's horizontal center
-                # normalized to [-1, 1]: + means the object is right of / below the center.
-                ex = ((x1 + x2) / 2 - w / 2) / (w / 2)
-                # how far the box's center is from the frame's vertical center
-                ey = ((y1 + y2) / 2 - h / 2) / (h / 2)
-                # calculates how close it is (bigger box means it's closer to the camera)
-                area = (x2 - x1) * (y2 - y1) / (w * h)
-                centered = abs(ex) < args.deadband and abs(ey) < args.deadband
-                # when an item is reached
-                reached = None # reached or (centered and area >= args.stop_area)
-                status = f"{label} {conf:.2f}  ex={ex:+.2f} ey={ey:+.2f} area={area:.2f}"
-
-                if not paused and not reached and now - last_cmd >= period:
-                    new = list(pose)
-                    if abs(ex) > args.deadband:
-                        new[BASE] -= args.base_gain * ex
-                    if abs(ey) > args.deadband:
-                        new[WRIST] += args.tilt_gain * ey
-                        new[SHOULDER] += args.shoulder_track_gain * ey
-                        new[ELBOW] += args.elbow_track_gain * ey
-                    # Only reach once roughly centered, so it doesn't lunge off to the side.
-                    if abs(ex) < 2 * args.deadband and area < args.stop_area:
-                        step = args.reach_gain * (1 - area / args.stop_area)
-                        new[SHOULDER] += step
-                        new[ELBOW] += step * args.elbow_ratio
-                    new = clamp_pose(new)
-
-                    if any(abs(a - b) > 0.05 for a, b in zip(new, pose)):
-                        pose = new
-                        # Duration a bit longer than the send period so motion blends smoothly.
-                        arm.pose(pose, period * 1000 * 1.5)
-                    last_cmd = now
+                    if not paused and not reached and now - last_cmd >= period:
+                        new = list(pose)
+                        if abs(ex) > args.deadband:
+                            new[BASE] -= args.base_gain * ex
+                        if abs(ey) > args.deadband:
+                            new[WRIST] += args.tilt_gain * ey
+                            new[SHOULDER] += args.shoulder_track_gain * ey
+                            new[ELBOW] += args.elbow_track_gain * ey
+                        # Only reach once roughly centered, so it doesn't lunge off to the side.
+                        if abs(ex) < 2 * args.deadband and area < args.stop_area:
+                            step = args.reach_gain * (1 - area / args.stop_area)
+                            new[SHOULDER] += step
+                            new[ELBOW] += step * args.elbow_ratio
+                        new = clamp_pose(new)
+                        if any(abs(a - b) > 0.05 for a, b in zip(new, pose)):
+                            pose = new
+                            # Duration a bit longer than the send period so motion blends smoothly.
+                            arm.pose(pose, period * 1000 * 1.5)
+                        last_cmd = now
 
 
 
-                color = (0, 255, 0) if reached else (0, 200, 255)
-                cv2.rectangle(frame, (int(x1), int(y1)), (int(x2), int(y2)), color, 2)
-            else:
-                lost_frames += 1
-                if lost_frames == 5 and not args.dry_run:
-                    arm.send("stop")  # freeze rather than drift on stale commands
+                    color = (0, 255, 0) if reached else (0, 200, 255)
+                    cv2.rectangle(frame, (int(x1), int(y1)), (int(x2), int(y2)), color, 2)
+                else:
+                    lost_frames += 1
+                    if lost_frames == 5 and not args.dry_run:
+                        arm.send("stop")  # freeze rather than drift on stale commands
 
-            if state == "APPROACHING":
-                if det and centered and area >= args.stop_area:
-                    if args.grab is None:
-                        reached = False # True   # nothing to grasp with; just hold here
-                    else:
-                        pre_grab_area = area
-                        pose[GRIPPER] = args.grab
-                        pose = clamp_pose(pose)
-                        arm.pose(pose, 800)
-                        state, state_t0 = "CLOSING", now
-            elif state == "CLOSING":
-                if now - state_t0 >= args.grasp_settle_ms / 1000:
-                    verify_samples.clear()
-                    state, state_t0 = "VERIFYING", now
-            elif state == "VERIFYING":
-                verify_samples.append((det is not None, area if det else 0.0))
-                if len(verify_samples) >= args.verify_frames:
-                    result = evaluate_grasp(verify_samples, pre_grab_area)
-                    if result == "GRASPED":
-                        state = "GRASPED"
-                    else:
-                        pose[GRIPPER] = args.open_angle
-                        pose = clamp_pose(pose)
-                        arm.pose(pose, 500)
-                        state = "APPROACHING"
-                        reached = False
-            elif state == "GRASPED":
-                pass 
+                if state == "APPROACHING":
+                    if det and centered and area >= args.stop_area:
+                        if args.grab is None:
+                            reached = True   # nothing to grasp with; just hold here
+                        else:
+                            pre_grab_area = area
+                            pose[GRIPPER] = args.grab
+                            pose = clamp_pose(pose)
+                            arm.pose(pose, 800)
+                            state, state_t0 = "CLOSING", now
+                elif state == "CLOSING":
+                    if now - state_t0 >= args.grasp_settle_ms / 1000:
+                        verify_samples.clear()
+                        state, state_t0 = "VERIFYING", now
+                elif state == "VERIFYING":
+                    verify_samples.append((det is not None, area if det else 0.0))
+                    if len(verify_samples) >= args.verify_frames:
+                        result = evaluate_grasp(verify_samples, pre_grab_area)
+                        if result == "GRASPED":
+                            state = "GRASPED"
+                        else:
+                            pose[GRIPPER] = args.open_angle
+                            pose = clamp_pose(pose)
+                            arm.pose(pose, 500)
+                            state = "APPROACHING"
+                            reached = False
+                elif state == "GRASPED":
+                    pass 
 
-            # if reached:
-            #    status = "REACHED  " + status
-            # if paused:
-            #    status = "PAUSED  " + status
+                if reached:
+                    status = "REACHED  " + status
+                if paused:
+                    status = "PAUSED  " + status
 
         # Make camera pop up 
         cv2.drawMarker(frame, (w // 2, h // 2), (255, 255, 255), cv2.MARKER_CROSS, 20, 1)
         cv2.putText(frame, status, (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
-        #for i, text in enumerate(pointing_at):
-            #cv2.putText(frame, text, (10, 55 + 25 * i), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
         cv2.imshow("arm tracker", frame)
 
         key = cv2.waitKey(1) & 0xFF
