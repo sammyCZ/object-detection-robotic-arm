@@ -41,9 +41,9 @@ import collections
 BASE, SHOULDER, ELBOW, WRIST, GRIPPER = range(5)
 # Mirror the firmware's safety clamps in the include/config.h.
 # The firmware clamps too, but clamping here stops the controller from "winding up" past a limit.
-LIMITS = [(45, 135), (45, 135), (45, 130), (45, 180), (60, 120)]
+LIMITS = [(45, 135), (45, 180), (10, 180), (45, 180), (60, 120)]
 # Netural resting position
-HOME = [90.0, 120.0, 110.0, 150.0, 90.0]
+HOME = [90.0, 120.0, 80.0, 150.0, 90.0]
 
 HAND_MODEL_URL = ("https://storage.googleapis.com/mediapipe-models/hand_landmarker/"
                   "hand_landmarker/float16/latest/hand_landmarker.task")
@@ -174,6 +174,7 @@ def stdin_target_listener(q: queue.Queue):
 
 
 def main():
+# ---------------------------------------------------------------------------------------------------Neto Check Start -----------------------------
     ap = argparse.ArgumentParser(description="Steer the ESP32 arm toward a YOLO detection")
     ap.add_argument("--model", default="yolo11n.pt")
     ap.add_argument("--camera", type=int, default=0, help="camera index (/dev/videoN)")
@@ -230,27 +231,35 @@ def main():
     pose = list(HOME)
     arm.pose(pose, 1500)
 
+    # Motion Control
     period = 1.0 / args.rate
     last_cmd = 0.0
     paused = False
     reached = False
     mode = "HOME"
     lost_frames = 0
-    start = prev = time.time()
-    print("Running. space = pause/resume, h = home, m = mediapipe, q = quit")
+
+    # Hand waving detection
+    start = time.time()
     wave_step = 'idle'
     wave_state = {}
 
-
+    # Grasp Verification
     state = "APPROACHING"
     state_t0 = 0.0
     pre_grab_area = None
     verify_samples = collections.deque(maxlen=20)
 
-    # Threads yayyy
+    # Receive target names from terminal
     target_queue = queue.Queue()
     current_target = args.target
-    threading.Thread(target=stdin_target_listener, args=(target_queue,), daemon=True).start()
+    threading.Thread(
+        target=stdin_target_listener, 
+        args=(target_queue,), 
+        daemon=True
+        ).start()
+    
+    print("Running. space = pause/resume, h = home, m = mediapipe, q = quit")
 
     while True:
         ok, frame = cap.read()
@@ -258,16 +267,32 @@ def main():
             print("Camera read failed")
             break
 
-    
-        while not target_queue.empty():
-            candidate = target_queue.get_nowait()
-            if candidate in model.names.values():
-                current_target = candidate
-                reached = False
-                lost_frames = 0
-                state, state_t0 = "APPROACHING", time.time()   # add this
-            else:
+        # Process target names entered in the terminal
+        while True:
+            try:
+                candidate = target_queue.get_nowait()
+            except queue.Empty:
+                break
+
+            if candidate not in model.names.values():
                 print(f"'{candidate}' is not an object that this model detects")
+                continue
+            
+            current_target = candidate
+            reached = False
+            lost_frames = 0
+            state = "APPROACHING"
+            state_t0 = time.time()
+        # Previous Code Below:
+        # while not target_queue.empty():
+        #    candidate = target_queue.get_nowait()
+        #    if candidate in model.names.values():
+        #        current_target = candidate
+        #        reached = False
+        #        lost_frames = 0
+        #        state, state_t0 = "APPROACHING", time.time()   # add this
+        #    else:
+        #        print(f"'{candidate}' is not an object that this model detects")
 
         h, w = frame.shape[:2]
         now = time.time()

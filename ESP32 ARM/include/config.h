@@ -34,13 +34,13 @@ struct JointConfig {
 constexpr JointConfig JOINTS[NUM_JOINTS] = {
   // name        ch  min  max  home  us0   us180
   {"base",       0,  45,  135,  90,   500, 2500},
-  {"shoulder",   1,  45,  135,  120,  500, 2500},
-  {"elbow",      2,  45,  130,  110,  500, 2500},
+  {"shoulder",   1,  45,  180,  120,  500, 2500},
+  {"elbow",      2,  10,  180,  80, 500, 2500},   // elbow is max = down, min = up
   {"wrist",      3,  45,  180,  150,  500, 2500},
   {"gripper",    4,  60,  120,  90,   500, 2500},
 };
 
-// ---- Motion ----
+// ---- Motion ---
 constexpr uint32_t MOTION_UPDATE_MS = 20;    // 50 Hz, matches the servo frame rate
 constexpr uint32_t DEFAULT_MOVE_MS = 1000;
 constexpr uint32_t MAX_MOVE_MS = 10000; 
