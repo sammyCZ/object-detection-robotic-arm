@@ -41,7 +41,7 @@ import collections
 BASE, SHOULDER, ELBOW, WRIST, GRIPPER = range(5)
 # Mirror the firmware's safety clamps in the include/config.h.
 # The firmware clamps too, but clamping here stops the controller from "winding up" past a limit.
-LIMITS = [(45, 135), (45, 135), (45, 130), (45, 180), (60, 120)]
+LIMITS = [(45, 135), (45, 135), (45, 180), (45, 180), (60, 120)]
 # Netural resting position
 HOME = [90.0, 120.0, 110.0, 150.0, 90.0]
 
