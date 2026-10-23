@@ -41,9 +41,9 @@ import collections
 BASE, SHOULDER, ELBOW, WRIST, GRIPPER = range(5)
 # Mirror the firmware's safety clamps in the include/config.h.
 # The firmware clamps too, but clamping here stops the controller from "winding up" past a limit.
-LIMITS = [(45, 135), (45, 135), (45, 130), (45, 180), (60, 120)]
+LIMITS = [(45, 135), (45, 180), (10, 180), (45, 180), (60, 120)]
 # Netural resting position
-HOME = [90.0, 120.0, 110.0, 150.0, 90.0]
+HOME = [90.0, 120.0, 80.0, 150.0, 90.0]
 
 HAND_MODEL_URL = ("https://storage.googleapis.com/mediapipe-models/hand_landmarker/"
                   "hand_landmarker/float16/latest/hand_landmarker.task")
@@ -174,12 +174,13 @@ def stdin_target_listener(q: queue.Queue):
             break
 
 def main():
+# ---------------------------------------------------------------------------------------------------Neto Check Start -----------------------------
     ap = argparse.ArgumentParser(description="Steer the ESP32 arm toward a YOLO detection")
     ap.add_argument("--model", default="yolo11n.pt")
     ap.add_argument("--camera", type=int, default=0, help="camera index (/dev/videoN)")
     ap.add_argument("--target", default=None,
                     help="class to follow, e.g. bottle, cup, sports ball (default: any)")
-    ap.add_argument("--conf", type=float, default=0.4)
+    ap.add_argument("--conf", type=float, default=0.1)
     ap.add_argument("--hands", type=int, default=2, help="max hands to track")
     ap.add_argument("--port", default=None, help="serial port (default: auto-detect)")
     ap.add_argument("--dry-run", action="store_true", help="don't open serial, print commands")
@@ -230,27 +231,35 @@ def main():
     pose = list(HOME)
     arm.pose(pose, 1500)
 
+    # Motion Control
     period = 1.0 / args.rate
     last_cmd = 0.0
     paused = False
     reached = False
     mode = "HOME"
     lost_frames = 0
-    start = prev = time.time()
-    print("Running. space = pause/resume, h = home, m = mediapipe, q = quit")
+
+    # Hand waving detection
+    start = time.time()
     wave_step = 'idle'
     wave_state = {}
 
-
+    # Grasp Verification
     state = "APPROACHING"
     state_t0 = 0.0
     pre_grab_area = None
     verify_samples = collections.deque(maxlen=20)
 
-    # Threads yayyy
+    # Receive target names from terminal
     target_queue = queue.Queue()
     current_target = args.target
-    threading.Thread(target=stdin_target_listener, args=(target_queue,), daemon=True).start()
+    threading.Thread(
+        target=stdin_target_listener, 
+        args=(target_queue,), 
+        daemon=True
+        ).start()
+    
+    print("Running. space = pause/resume, h = home, m = mediapipe, q = quit")
 
     while True:
         ok, frame = cap.read()
@@ -258,24 +267,40 @@ def main():
             print("Camera read failed")
             break
 
+        # Process target names entered in the terminal
+        while True:
+            try:
+                candidate = target_queue.get_nowait()
+            except queue.Empty:
+                break
 
-    
-        while not target_queue.empty():
-            candidate = target_queue.get_nowait()
-            if candidate in model.names.values():
-                current_target = candidate
-                reached = False
-                lost_frames = 0
-                state, state_t0 = "APPROACHING", time.time()   # add this
-            else:
+            if candidate not in model.names.values():
                 print(f"'{candidate}' is not an object that this model detects")
+                continue
+            
+            current_target = candidate
+            reached = False
+            lost_frames = 0
+            state = "APPROACHING"
+            state_t0 = time.time()
+        # Previous Code Below:
+        # while not target_queue.empty():
+        #    candidate = target_queue.get_nowait()
+        #    if candidate in model.names.values():
+        #        current_target = candidate
+        #        reached = False
+        #        lost_frames = 0
+        #        state, state_t0 = "APPROACHING", time.time()   # add this
+        #    else:
+        #        print(f"'{candidate}' is not an object that this model detects")
 
         h, w = frame.shape[:2]
         now = time.time()
         result = None
         det = None
+# ----------------------------------------------------------------------------------------------------------Neto Check End--------------------------
         if mode in ("YOLO", "MEDIAPIPE"):
-            result = model.predict(frame, device=device, conf=args.conf, verbose=False)[0]
+            result = model.predict(frame, device=device, classes = [39], conf=args.conf, verbose=False)[0]
             det = pick_target(result, current_target, model.names)
 
 
@@ -336,7 +361,7 @@ def main():
                 area = (x2 - x1) * (y2 - y1) / (w * h)
                 centered = abs(ex) < args.deadband and abs(ey) < args.deadband
                 # when an item is reached
-                reached = reached or (centered and area >= args.stop_area)
+                reached = None # reached or (centered and area >= args.stop_area)
                 status = f"{label} {conf:.2f}  ex={ex:+.2f} ey={ey:+.2f} area={area:.2f}"
 
                 if not paused and not reached and now - last_cmd >= period:
@@ -353,6 +378,7 @@ def main():
                         new[SHOULDER] += step
                         new[ELBOW] += step * args.elbow_ratio
                     new = clamp_pose(new)
+
                     if any(abs(a - b) > 0.05 for a, b in zip(new, pose)):
                         pose = new
                         # Duration a bit longer than the send period so motion blends smoothly.
@@ -371,7 +397,7 @@ def main():
             if state == "APPROACHING":
                 if det and centered and area >= args.stop_area:
                     if args.grab is None:
-                        reached = True   # nothing to grasp with; just hold here
+                        reached = False # True   # nothing to grasp with; just hold here
                     else:
                         pre_grab_area = area
                         pose[GRIPPER] = args.grab
@@ -397,10 +423,10 @@ def main():
             elif state == "GRASPED":
                 pass 
 
-            if reached:
-                status = "REACHED  " + status
-            if paused:
-                status = "PAUSED  " + status
+            # if reached:
+            #    status = "REACHED  " + status
+            # if paused:
+            #    status = "PAUSED  " + status
 
         # Make camera pop up 
         cv2.drawMarker(frame, (w // 2, h // 2), (255, 255, 255), cv2.MARKER_CROSS, 20, 1)
