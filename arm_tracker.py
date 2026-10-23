@@ -63,7 +63,7 @@ INDEX_FINGERTIP = 8
 class ArmLink:
     """Sends pose commands to the ESP32 over USB serial (or just prints them)."""
     # just prints a note, but doesn't open any real connection
-    def __init__(self, port, dry_run):
+    def __init__(self, port, dry_run): # opens the serial port, auto-detects a port if none given
         self.ser = None
         if dry_run:
             print("[dry-run] no serial port; commands are printed instead")
@@ -86,7 +86,7 @@ class ArmLink:
         threading.Thread(target=self._reader, daemon=True).start()
 
     @staticmethod
-    def _find_port():
+    def _find_port(): #finds port on mac 
         # Linux: ttyUSB/ttyACM. macOS: cu.usbserial-* (CP2102/CH340) or cu.usbmodem*.
         # On a Mac use the cu.* device, not tty.*, which waits for a modem carrier.
         patterns = ["/dev/ttyUSB*", "/dev/ttyACM*", "/dev/cu.usbserial*",
@@ -97,7 +97,7 @@ class ArmLink:
                              "or use --dry-run.")
         return ports[0]
 
-    def _reader(self):
+    def _reader(self): #print line from esp-32
         while True:
             try:
                 line = self.ser.readline().decode(errors="replace").strip()
@@ -106,17 +106,17 @@ class ArmLink:
             if line.startswith("error") or line.startswith("ERROR"):
                 print("ESP32:", line)
 
-    def send(self, cmd):
+    def send(self, cmd): # writes a raw command string to the serial port
         if self.ser is None:
             print("->", cmd)
         else:
             self.ser.write((cmd + "\n").encode())
 
-    def pose(self, p, ms):
+    def pose(self, p, ms): # formats a 5-angle pose + duration into a pose command and sents it 
         self.send("pose " + " ".join(f"{a:.1f}" for a in p) + f" {int(ms)}")
 
 
-def pick_device():
+def pick_device(): # picks the fastest available torch device (GPU, MPS, CPU)
     """NVIDIA GPU (Jetson/PC), Apple-silicon GPU (Mac), or CPU, in that order."""
     if torch.cuda.is_available():
         return 0
@@ -125,11 +125,12 @@ def pick_device():
     return "cpu"
 
 
-def clamp_pose(p):
+def clamp_pose(p): # limits each joint angle based on the firmware safety clamps
+                    # guards every pose write 
     return [min(max(a, lo), hi) for a, (lo, hi) in zip(p, LIMITS)]
 
 
-def pick_target(result, target, names):
+def pick_target(result, target, names): # scans a YOLO's box and returns the best match (by confidence x box area)
     """Return (box_xyxy, label, conf) of the best matching detection, or None."""
     best, best_score = None, 0.0
     for box, cls, conf in zip(result.boxes.xyxy.tolist(), result.boxes.cls.tolist(),
@@ -143,19 +144,42 @@ def pick_target(result, target, names):
             best, best_score = (box, label, conf), score
     return best
 
-def evaluate_grasp(samples, pre_area):
-    seen_count = sum(1 for seen, _ in samples if seen)
-    if seen_count == 0:
-        return "GRASPED"
+def _edges_touched(box, w, h, margin = 6):
+    x1, y1, x2, y2 = box
+    return (x1 <= margin) + (y1 <= margin) + (x2 >= w - margin) + (y2 >= h - margin)
 
-    areas = [a for seen, a in samples if seen]
-    avg_area = sum(areas) / len(areas)
-    if pre_area and avg_area < pre_area * 0.5:
+MIN_SEEN_FRACTION = 0.5 # item must be detected in at least half the verify frames 
+MIN_CUTOFF_FRACTION = 0.7 # of the seen frames, how many must show the box clipped 
+EDGE_MARGIN_PX = 6 # how close to the border counts as "touching"
+def evaluate_grasp(samples, pre_area): # rolling window of (seen, area) after closing the gripper.
+                                        # if the object failed, it's still called grasped. if it's visible but shrunk to <50% then grasp judged to have failed
+                                        # drives the closing->verifying state machine 
+    seen = [s for s in samples if s.seen]
+    if len(seen) < len(samples) * MIN_SEEN_FRACTION:
         return "FAILED"
-    return "GRASPED"   
+
+    cutoff_hits = sum(1 for s in seen if _edges_touched(s.box, frame_w, frame_h, EDGE_MARGIN_PX) >= 1)
+    cutoff_fraction = cutoff_hits / len(seen)
+
+    avg_area = sum(s.area for s in seen / len(seen))
+    held_close = pre_area is None or avg_area >= pre_area * 0.5
+
+    if cutoff_fraction >= MIN_CUTOFF_FRACTION and held_close():
+        return "GRASPED"
+    return "FAILED"
+
+    # seen_count = sum(1 for seen, _ in samples if seen)
+    # if seen_count == 0:
+    #     return "GRASPED"
+
+    # areas = [a for seen, a in samples if seen]
+    # avg_area = sum(areas) / len(areas)
+    # if pre_area and avg_area < pre_area * 0.5:
+    #     return "FAILED"
+    # return "GRASPED"   
 
 
-def get_box(result):
+def get_box(result): #tuples for mediapipe
     boxes = []
     for box in result.boxes:
         x1, y1, x2, y2 = map(int, box.xyxy[0].tolist())
@@ -164,7 +188,7 @@ def get_box(result):
     return boxes
 
 # Loops to get user input 
-def stdin_target_listener(q: queue.Queue):
+def stdin_target_listener(q: queue.Queue): #runs daemon thread. lets you retarget via target_queue while the loop runs
     while True: 
         try: 
             text = input("target> ").strip()
