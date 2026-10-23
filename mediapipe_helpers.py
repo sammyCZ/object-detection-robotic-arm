@@ -1,6 +1,7 @@
 import os
 import cv2
 import math
+import time
 import urllib.request
 import mediapipe as mp
 from mediapipe.tasks.python import vision
@@ -42,8 +43,7 @@ def detect_hand_postion(landmarker, frame, timestamp_ms):
     return hands
 
 
-def draw(frame, boxes, hands, hand_connections, index_fingertip):
-
+def draw_hand_lines(frame, boxes, hands, hand_connections):
     for x1, y1, x2, y2, name, conf in boxes:
         top_left_corner = (x1, y1)
         bot_right_corner = (x2, y2)
@@ -54,19 +54,12 @@ def draw(frame, boxes, hands, hand_connections, index_fingertip):
         cv2.putText(frame, f"{name} {conf:.2f}", (text_pos), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, thickness) 
 
 
-    pointing_at = []
-    for label, pixel_postion in hands:
+    for _, pixel_postion in hands:
         for a, b in hand_connections:
             cv2.line(frame, pixel_postion[a], pixel_postion[b], (255, 255, 255), 2)
         for p in pixel_postion:
             cv2.circle(frame, p, 3, (0, 128, 255), 2)
-        tx, ty = pixel_postion[index_fingertip]
-
-        for x1, y1, x2, y2, name, _ in boxes:
-            if name != "person" and x1 <= tx <= x2 and y1 <= ty <= y2:
-                pointing_at.append(f"{label} hand -> {name}")
-
-    return pointing_at
+            
 
 
 def detect_waving(hands, wave_state, timestamp_ms):
@@ -153,8 +146,12 @@ def is_hand_open(points):
     return True
             
 
-
-
+def update_wave_motion(arm, pose, angle, state, base_index):
+    pose[base_index] = angle
+    arm.pose(pose, 1000)
+    wave_step = f"moving to {state}"
+    next_move_time = time.monotonic() + 1
+    return wave_step, next_move_time
 
 
 
